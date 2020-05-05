@@ -5,10 +5,6 @@ $defaultPatName="SourceTree"
 
 ########  DO NOT MODIFY BELOW  ########
 
-#TODO: Install Git
-
-
-
 ## HELPERS
 function Disable-CertificateChecks{
 add-type @"
