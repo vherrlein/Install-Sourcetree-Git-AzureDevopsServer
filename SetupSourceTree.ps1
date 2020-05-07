@@ -60,17 +60,17 @@ function Test-Url($url, $count){
     begin{if($count -eq $null){$count=3}}
     process{
         try{
-            $res = Invoke-WebRequest -WebSession $webSession -Method Head -Uri $url -ErrorAction Continue
+            $res = Invoke-WebRequest -WebSession $webSession -Method Head -Uri $url
 
-            $ok= $res.StatusCode -in 200;
-            if(-not $ok -and $res.StatusCode -eq 403 -and $count -gt 0){
+            $ok= $res.StatusCode -in 200,302,301;
+            return $ok
+        }catch{
+            if($_.Exception.Response.StatusCode -eq 401 -and $count -gt 0){
                 $global:webSession.UseDefaultCredentials = $false
                 $global:webSession.Credentials = $(Get-Credential -Message "[$($count-2)/3] Insert your credentials for $url");
                 return Test-Url $url ($count-1)
-            }else{
-                return $ok
             }
-        }catch{}
+        }
         return $false
     }
 }
@@ -669,6 +669,12 @@ function Complete-SourceTreeInstallation{
 
 ## MAIN
 function main{
+    
+    #Initialize Global variables
+    $global:webSession =  New-Object Microsoft.PowerShell.Commands.WebRequestSession
+    $global:webSession.UseDefaultCredentials = $true
+    $global:webSession.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
+
     #Ensure SSL Verification is disabled in case the certificate is self-signed
     Disable-CertificateChecks
     
@@ -705,12 +711,6 @@ function main{
     #Ensure shortcuts are available
     Complete-SourceTreeInstallation
     Write-Host "Main::SourceTree shortcuts restored"
-
-    
-
-    #Initialize Global variables
-    $global:webSession =  New-Object Microsoft.PowerShell.Commands.WebRequestSession
-    $global:webSession.UseDefaultCredentials = $true
 
     #Check TFS Url is working, if any insert credentials
     if(Test-Url $devOpsCollectionUrl){
