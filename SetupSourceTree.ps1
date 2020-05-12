@@ -162,6 +162,18 @@ function Invoke-DownloadFile{
         Unregister-Event -SourceIdentifier WebClient.DownloadFileCompleted -Force | Out-Null
     }  
  }
+function Out-FileUtf8NoBOM{
+    [cmdletbinding()]
+    param(
+        [parameter(Position = 0)]
+        [string]$path,
+        [parameter(ValueFromPipeline, ValueFromPipelineByPropertyName, Position = 1)]
+        [string]$input        
+    )
+    Remove-Item $path -Force -ea 0 | out-null
+    ""|out-file $path -Force
+    [System.IO.File]::WriteAllText($path,$input,[System.Text.Encoding]::ASCII) | out-null
+}
 
 ## TFS Methods
 function Get-TFSContext($collectionUrl){
@@ -256,6 +268,209 @@ function New-TFSPrivateAccessToken($tfsUrl, $patName){
 
 
 ## Git Methods
+function New-GitCommitMessageTemplate{
+    return @"
+#######################: 72 Characters :###############################
+# Title line
+type(scope): subject
+# BLANK LINE: Do not add text below.
+
+# Body: explain the propose of that commit to answer the how and why
+Your commit message
+# BLANK LINE: Do not add text below.
+
+# Footer
+# tags: 
+#
+###########################: HELP :####################################
+# # HELP
+#
+# Lines starting with # are ignored by Git
+#
+# ## Title line:
+#  * Maximum of 72 characters
+#  * Do NOT capitalize first letters
+#  * Format: <type>(<scope>): <subject>
+#    - <type>: cf. table below
+#    - (<scope>): optional, specify a place into the repository 
+#                 eg. (SolutionName/ComponentName)
+#    - <subject> MUST starts with an imperative verbs
+#      > add
+#      > update
+#      > remove
+#      > upgrade
+#      > downgrade
+# 
+# |  <type>  |   Description                                          |
+# |----------|--------------------------------------------------------|
+# | build	 |  Changes affecting the build or external dependencies  |
+# | ci       |  Changes to our CI configuration files and scripts\
+#               eg. Azure App Configuration, Azure Pipeline           |
+# | docs     |  Change performed only on the documentation            |
+# | feat     |  Adding a new feature/behavior to the source code      |
+# | fix      |  Correct a bug in the source code                      |
+# | perf     |  Code changes which improves the performance           |
+# | refactor |  Code changes which is not a fix or add a feature      |
+# | style    |  Beautifying the source code without build impacts\
+#               eg. white-spaces, code formatting...                  |
+# | test     |  Adding missing unit tests or fixing an existing one   |
+# | revert   |  When a commit must be rolling back.\
+#               *Attention*\
+#                 - <subject> MUST reuse the subject from the \
+#                   previous commit.
+#                 - <body> MUST start with:\
+#                   'This reverts commit <previous_commit_hash>'      |
+#
+#
+#  ## Body line(-s)
+#  * MUST use the imperative, present tense
+#  * 
+#  * Maximum of 72 characters per line for word wrapping
+#  * No line number limits
+#
+#
+#  ## Footer line
+#  * Format: tags: <branch_name>[; <INC|ENHCXXXXX>[; <INC|ENHCXXXXX>[; <INC|ENHCXXXXX>]]]
+#
+"@ -replace '[\r\n]$',''
+}
+function New-GitHooks{
+    $preCommit = 
+
+    return @{
+        "commit-msg" = 
+{param($repositoryPath, $messagePath)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$global:errorCount = 0;
+function Write-Check{
+    param([string]$message, [switch]$passed, [switch]$warning)
+    $warnOnly = $warning.IsPresent -and $warning.ToBool()
+    $ok=$passed.IsPresent -and $passed.ToBool()
+    $mark = if($ok){
+        @{
+            Object = [regex]::Unescape("\u2714")
+            ForegroundColor = 'Green'
+            NoNewLine = $true
+        }
+    }else{
+        if($warnOnly){
+            @{
+                Object = [regex]::Unescape("\u26a0")
+                ForegroundColor = 'Yellow'
+                NoNewLine = $true
+            }
+        }else{
+            @{
+                Object = [regex]::Unescape("\u2716")
+                ForegroundColor = 'Red'
+                NoNewLine = $true
+            }
+        }
+    }
+    Write-Host "[ " -NoNewline
+    Write-Host @mark
+    Write-Host " ] " -NoNewline
+    Write-Host $message
+    if(-not $ok -and -not $warnOnly){
+        $global:errorCount += 1;
+    }
+}
+
+$currentBranchName = $(git rev-parse --abbrev-ref HEAD)
+$currentBranchNameTrimmed = $currentBranchName -replace '^[^\/]+\/',''
+
+#BranchName checks
+$pattern="^(master|develop|feature\/(INC|ENHC)\d{5,7}|hotfix\/INC\d{5,7}|bugfix\/.+|release\/CHG\d{5,7})"
+Write-Check "The current branch name $currentBranchName follow the pattern -> $pattern" -passed:($currentBranchName -match $pattern)
+
+#Commit Check
+$message = Get-Content $messagePath -ErrorAction 0;
+if($null -eq $message){$message = ""}
+$lines = $message.Split([Environment]::NewLine)
+$linesChanged = $false
+
+$firstLine = $lines | Select-Object -First 1
+
+#first line 
+
+$pattern="^(?<type>build|ci|docs|feat|fix|perf|refactor|style|test|revert)(?:\((?<scope>[^\)]+)\))?:\s(?<subject>.+)"
+$matches = [regex]::Matches($firstLine, $pattern);
+Write-Check "Title line follow the pattern -> $pattern" -passed:(-not ($matches -eq $null -or $matches.Count -eq 0))
+
+#second line
+Write-Check "The second line is empty" -passed:($($lines | Select-Object -First 1 -Skip 1) -eq "")
+
+# Content lines less than 73 chars
+Write-Check "The message lines contains of maximum 72 characters" -passed:($($lines | Where-Object{$_.Length -gt 72}).Count -eq 0)
+
+#Footer line
+$footerBlankLine=$($lines | Select-Object -Last 2|Select-Object -First 1) -eq "";
+$startTags =($($lines| Select-Object -Last 1) -match "^tags:\s$currentBranchNameTrimmed")
+Write-Check "The line before the footer is empty" -passed:$footerBlankLine -warning
+Write-Check "The footer starts with required contents -> tags: $currentBranchNameTrimmed" -passed:$startTags -warning
+
+$lastLine = $($lines| Select-Object -Last 1).Trim() -replace ',',';'
+$linesChanged = $linesChanged -bor $lastLine -ne $($lines| Select-Object -Last 1).Trim()
+
+if(-not $startTags){
+    $linesChanged = $true;
+    $lastLine = if($lastLine -match '^tags:'){
+        $matches = [regex]::Matches($lastLine, '^tags:(.*)')
+        $tagsValue = $matches.Groups.Item(1).Value.Trim()
+        "tags: $currentBranchNameTrimmed"+$(if($tagsValue.Length -gt 0){"; $tagsValue"})
+    }else{
+        "$lastLine`r`n`r`ntags: $currentBranchNameTrimmed"
+    }
+    write-host "Tags added to the last commit message line"
+}
+if(-not $footerBlankLine -and $startTags){
+    $linesChanged = $true;
+    $lastLine = "`r`n$lastLine";
+}
+if($linesChanged){
+    $lines[0]=$firstLine
+    $lines[$lines.Length-1]=$lastLine
+    [System.IO.File]::WriteAllText($messagePath,$([string]::Join("`r`n",$lines)),[System.Text.Encoding]::ASCII) | out-null
+    Write-Host "Commit message updated !"
+}
+
+#exit
+if($global:errorCount -gt 0){
+    write-output "$global:errorCount errors, please make sure your commit message follow guidelines."
+}
+exit $global:errorCount
+}.ToString() 
+        "prepare-commit-msg" = 
+{param($repositoryPath, $messagePath)
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+$currentBranchName = $(git rev-parse --abbrev-ref HEAD)
+$currentBranchNameTrimmed = $currentBranchName -replace '^[^\/]+\/',''
+
+$revertCommitHash = "$(git rev-parse -q --verify REVERT_HEAD)"
+$isReverting = $revertCommitHash -ne ""
+
+#building the message
+if($isReverting){
+    $firstLine = $(git log --format=%B -n 1 $revertCommitHash).Split([Environment]::NewLine) | Select-Object -First 1
+    $firstLine = $firstLine -replace '^build|ci|docs|feat|fix|perf|refactor|style|test|revert'
+    $firstLine = $(if($firstLine -match '^\('){""}else{":"})+$firstLine;
+
+    $message=@"
+revert$firstLine
+
+This reverts commit $revertCommitHash.
+
+tags: $currentBranchNameTrimmed
+"@ -replace '^\s+|\s+$','';
+
+    [System.IO.File]::WriteAllText($messagePath,$message,[System.Text.Encoding]::ASCII) | out-null
+}
+
+exit 0}.ToString()
+    }
+
+}
 function Set-GitGlobalConfig($userDisplayName, $userEmail, [object[]]$UrlTokens){
 
     $gitBin = Get-ApplicationPath git.exe | select -First 1
@@ -268,6 +483,29 @@ function Set-GitGlobalConfig($userDisplayName, $userEmail, [object[]]$UrlTokens)
     $UrlTokens | %{
         $token64 = $([Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes(":$($_.token)"))).Trim()
         &$gitbin config --global http.$($_.url).extraHeader "Authorization: Basic $token64"
+    }
+
+
+    $usrGitPath = "$env:USERPROFILE\.git"
+    mkdir $usrGitPath -Force | out-null
+
+    #set default commit message template
+    $templatePath = "$usrGitPath\git_msg_template.txt"
+    New-GitCommitMessageTemplate | Out-FileUtf8NoBOM $templatePath
+
+    &$gitbin config --global commit.template "$templatePath"
+
+    
+    #Hooks
+    $hooksPath = "$usrGitPath\hooks"
+    mkdir $hooksPath -Force | out-null
+    
+    &$gitbin config --global core.hookspath `"~/.git/hooks`"
+
+    $hooks=New-GitHooks
+    $hooks.Keys | %{
+        "#!/bin/sh`r`npowershell.exe `"-NoProfile`" `"-ExecutionPolicy`" `"RemoteSigned`" `"-File`" `$(echo ~/.git/hooks/$_.ps1) `$(pwd) `$(pwd)'/'`$1 `$2 `$3 `$4 `$5 `$6`r`nexit" | Out-FileUtf8NoBOM "$hooksPath\$_"
+        $hooks[$_] | Out-FileUtf8NoBOM "$hooksPath\$_.ps1"
     }
 
 }
@@ -669,11 +907,9 @@ function Complete-SourceTreeInstallation{
 
 ## MAIN
 function main{
-    
     #Initialize Global variables
     $global:webSession =  New-Object Microsoft.PowerShell.Commands.WebRequestSession
     $global:webSession.UseDefaultCredentials = $true
-    $global:webSession.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
 
     #Ensure SSL Verification is disabled in case the certificate is self-signed
     Disable-CertificateChecks
@@ -711,6 +947,7 @@ function main{
     #Ensure shortcuts are available
     Complete-SourceTreeInstallation
     Write-Host "Main::SourceTree shortcuts restored"
+
 
     #Check TFS Url is working, if any insert credentials
     if(Test-Url $devOpsCollectionUrl){
