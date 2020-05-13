@@ -18,8 +18,40 @@ add-type @"
         }
     }
 "@
+if (-not ([System.Management.Automation.PSTypeName]'ServerCertificateValidationCallback').Type)
+{
+$certCallback = @"
+    using System;
+    using System.Net;
+    using System.Net.Security;
+    using System.Security.Cryptography.X509Certificates;
+    public class ServerCertificateValidationCallback
+    {
+        public static void Ignore()
+        {
+            if(ServicePointManager.ServerCertificateValidationCallback ==null)
+            {
+                ServicePointManager.ServerCertificateValidationCallback += 
+                    delegate
+                    (
+                        Object obj, 
+                        X509Certificate certificate, 
+                        X509Chain chain, 
+                        SslPolicyErrors errors
+                    )
+                    {
+                        return true;
+                    };
+            }
+        }
+    }
+"@
+    Add-Type $certCallback
+ }
+    [System.Net.ServicePointManager]::ServerCertificateValidationCallback = $null
+    [ServerCertificateValidationCallback]::Ignore()
     [System.Net.ServicePointManager]::CertificatePolicy = New-Object TrustAllCertsPolicy
-    [Net.ServicePointManager]::SecurityProtocol = "tls12, tls11, tls"
+    [Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]([string]::Join(",",$([enum]::GetNames([System.Net.SecurityProtocolType]) | ?{$_ -ne "SystemDefault"})))
 }
 function Get-Software ($filter)  {
     "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*",
@@ -513,7 +545,7 @@ function Get-GitOnlineVersions{
 
     $pattern = if([Environment]::Is64BitOperatingSystem){'Git-\d+\.\d+\.\d+.*-64-bit\.exe$'}else{'Git-\d+\.\d+\.\d+.*-32-bit\.exe$'}
 
-    $res = Invoke-RestMethod https://api.github.com/repos/git-for-windows/git/releases -UseDefaultCredentials
+    $res = Invoke-RestMethod https://api.github.com/repos/git-for-windows/git/releases -WebSession $global:webSession
 
     $res | ?{ -not $_.prerelease } | %{
         [pscustomobject]@{
@@ -556,8 +588,10 @@ function Install-Git([bool]$latest){
         ## Buggy with GitHub - https://powershell.org/forums/topic/bits-transfer-with-github/ 
         #Start-BitsTransfer -Source $version.url -Destination $fileFullName
 
-        $wc = New-Object System.Net.WebClient
-        $wc.UseDefaultCredentials = $true
+        $wc = New-Object Net.WebClient
+        $wc.UseDefaultCredentials = $Global:webSession.UseDefaultCredentials
+        $wc.Credentials = $Global:webSession.Credentials
+        $wc.Proxy = $Global:webSession.Proxy
         
         Invoke-DownloadFile $version.url $fileFullName
 
@@ -608,7 +642,7 @@ function Set-SourceTreeAccounts([string]$url, $userDisplayName, $userEmail){
         [System.Collections.ArrayList]$accounts = $null;
 
         if(Test-Path $filePath){
-           $o = ([object[]](Get-Content $filePath | ConvertFrom-Json)) | ?{ $_.HostInstance.BaseUrl -ine $devOpsCollectionUrl }
+           $o = ([object[]](Get-Content $filePath | Out-String | ConvertFrom-Json)) | ?{ $_.HostInstance.BaseUrl -ine $devOpsCollectionUrl }
 
            if($o.Count -eq 0 -or $o.Count -eq $null){[object[]]$o=@([object]$o)}else{$o=[object[]]$o}
 
@@ -823,7 +857,7 @@ function Remove-SourceTreeSSLVerification{
 }
 function Get-SourceTreeOnlineVersions{
     
-    $res = Invoke-WebRequest https://www.sourcetreeapp.com/download-archives -UseDefaultCredentials
+    $res = Invoke-WebRequest https://www.sourcetreeapp.com/download-archives -UseDefaultCredentials -WebSession $global:webSession
 
     $matches = [regex]::Matches($res.RawContent,'"(?<url>https?:\/\/[^"]+\/[^"]+-(?<version>\d+\.\d+\.\d+)\.exe)"',[System.Text.RegularExpressions.RegexOptions]"IgnoreCase,Multiline,ECMAScript")
 
@@ -861,6 +895,10 @@ function Install-SourceTree([bool]$latest){
 
         }
         
+        if(Test-Path "$env:LOCALAPPDATA\SourceTree"){
+            Remove-Item "$env:LOCALAPPDATA\SourceTree" -Force -ErrorAction 0
+        }
+
         #Download
         $fileName = Split-Path $version.url -Leaf
         $fileFullName = "$env:TEMP\$fileName"
@@ -907,12 +945,13 @@ function Complete-SourceTreeInstallation{
 
 ## MAIN
 function main{
+    #Ensure SSL Verification is disabled in case the certificate is self-signed
+    Disable-CertificateChecks
+
     #Initialize Global variables
     $global:webSession =  New-Object Microsoft.PowerShell.Commands.WebRequestSession
     $global:webSession.UseDefaultCredentials = $true
-
-    #Ensure SSL Verification is disabled in case the certificate is self-signed
-    Disable-CertificateChecks
+    $global:webSession.Proxy = [System.Net.WebRequest]::GetSystemWebProxy()
     
     Write-Host "Main::Starts"
     
@@ -998,6 +1037,6 @@ function main{
 
 try{
     main
-}catch{
-    Write-Error $_
+}finally{
+
 }
