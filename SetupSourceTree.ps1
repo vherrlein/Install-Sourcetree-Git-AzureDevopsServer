@@ -423,9 +423,49 @@ $linesChanged = $false
 
 $firstLine = $lines | Select-Object -First 1
 
-#first line 
+#first line
 
 $pattern="^(?<type>build|ci|docs|feat|fix|perf|refactor|style|test|revert)(?:\((?<scope>[^\)]+)\))?:\s(?<subject>.+)"
+
+## Rewite full Message when git-flow release finish
+
+$mergingCommit = "$(git rev-parse -q --verify MERGE_HEAD)"
+$isMerging = $mergingCommit -ne [string]::Empty
+
+if($isMerging -and $firstLine -imatch "^merge branch 'release\/[^']+'(?:\s+)?$"){
+    $releaseBranchName = $firstLine -replace "^merge branch '(release\/[^']+)'(?:\s+)?$",'$1'
+    $releaseName = $releaseBranchName -replace "[^\/]+\/([^\/]+)$",'$1'
+    $firstLine = "build: merge release $releaseName"
+    $lines = @(
+        $firstLine,
+        "",
+        "Merge '$releaseBranchName' back to '$currentBranchName with the following:"
+    )
+    ($(git cherry -v $currentBranchName $releaseBranchName) | Out-String) -split "[\r\n]+" | ?{ -not [string]::IsNullOrEmpty($_) } | %{
+        $title = $_ -ireplace '^\+\s[\dabcdef]{40}\s',''
+
+        if($title -imatch $pattern){
+            $title = $title -replace $pattern,'${subject}'
+        }
+        if($title.Length -gt 70){
+            $title = $title.SubString(0, 67)+"..."
+        }
+        $lines+="* $title"
+    }
+    $lines += ""
+    $lines += "`r`n`r`ntags: $releaseName";
+
+    $linesChanged = $true;
+}
+
+if($isMerging -and $firstLine -imatch "^merge tag '[^']+'.*"){
+    $firstLine = "build: merge tag $($firstLine -replace "^merge tag ('[^']+').*",'$1')"
+    $linesChanged = $true;
+}
+
+## ends: Rewite full Message when git-flow release finish
+
+
 $matches = [regex]::Matches($firstLine, $pattern);
 Write-Check "Title line follow the pattern -> $pattern" -passed:(-not ($matches -eq $null -or $matches.Count -eq 0))
 
@@ -446,10 +486,10 @@ $linesChanged = $linesChanged -bor $lastLine -ne $($lines| Select-Object -Last 1
 
 if(-not $startTags){
     $linesChanged = $true;
-    $lastLine = if($lastLine -match '^tags:'){
-        $matches = [regex]::Matches($lastLine, '^tags:(.*)')
+    $lastLine = if($lastLine -match '^(?:[\r\n]+)?tags:'){
+        $matches = [regex]::Matches($lastLine, '^(?:[\r\n]+)?tags:(.*)')
         $tagsValue = $matches.Groups.Item(1).Value.Trim()
-        "tags: $currentBranchNameTrimmed"+$(if($tagsValue.Length -gt 0){"; $tagsValue"})
+        "$($lastLine -replace '^([\r\n]+).+','$1')tags: $currentBranchNameTrimmed"+$(if($tagsValue.Length -gt 0){"; $tagsValue"})
     }else{
         "$lastLine`r`n`r`ntags: $currentBranchNameTrimmed"
     }
